@@ -1,0 +1,303 @@
+The modern server model
+Based on epoll
+
+ZY ZHANG
+
+* Agenda
+
+- Speaking from C10K
+- Traditional solution
+- C1000K
+- IO multiplexing
+- Why not select or poll
+- Why epoll
+- LT or ET
+- Servers based on reactor model
+- The ideal server model
+- How about Golang
+
+* Speaking from C10K
+
+- In 1999 one of the busiest ftp sites, cdrom.com, actually handled 10000 clients simultaneously through a Gigabit Ethernet pipe.
+- You can buy a 1000MHz machine with 2 gigabytes of RAM and an 1000Mbit/sec Ethernet card for $1200
+ --By Dan Kegel
+
+* Traditional solution
+
+- Per request per process (e.g Apache)
+- Per request per thread (e.g Tomcat)
+
+* Multiple thread web server architecture
+
+.image images/multiple_thread_web_server_architecture.png 540 557
+
+* What's the main problem?
+
+* Frequent context switching
+
+ Suppose you create 10K threads/processes which do numbers of network IO  in a machine having 8 cores,
+ you will see lots of processes waiting for run time and the cs metric is very high ->
+ when running vmstat tool
+
+ The most significant system indicators are high load, and low CPU utilization
+
+* The Cost of Context Switching
+
+Context switching is generally computationally intensive. That is, it requires considerable processor time, which can be on the order of nanoseconds for each of the tens or hundreds of switches per second. Thus, context switching represents a substantial cost to the system in terms of CPU time and can, in fact, be the most costly operation on an operating system.
+
+Consequently, a major focus in the design of operating systems has been to avoid unnecessary context switching to the extent possible. However, this has not been easy to accomplish in practice. In fact, although the cost of context switching has been declining when measured in terms of the absolute amount of CPU time consumed, this appears to be due mainly to increases in CPU clock speeds rather than to improvements in the efficiency of context switching itself.
+
+One of the many advantages claimed for Linux as compared with other operating systems, including some other Unix-like systems, is its extremely low cost of context switching and mode switching.
+
+* The modern CPU Architecture
+
+.image images/Symmetric_Multiprocessor_System.svg 400 600
+
+* The modern Memory Design
+
+ NUMA: Not-Uniform Memory Access
+
+.image images/NUMA.svg
+
+* Numbers Everyone Should Know
+
+    L1 cache reference	0.5 ns
+    Branch mispredict	5 ns
+    L2 cache reference	7 ns
+    Mutex lock/unlock	100 ns
+    Main memory reference	100 ns
+    Compress 1K bytes with Zippy	10,000 ns	0.01 ms
+    Send 1K bytes over 1 Gbps network	10,000 ns	0.01 ms
+    Read 1 MB sequentially from memory	250,000 ns	0.25 ms
+    Round trip within same datacenter	500,000 ns	0.5 ms
+    Disk seek	10,000,000 ns	10 ms
+    Read 1 MB sequentially from network	10,000,000 ns	10 ms
+    Read 1 MB sequentially from disk	30,000,000 ns	30 ms
+    Send packet CA->Netherlands->CA	150,000,000 ns	150 ms
+
+* The concurrency problems we are facing
+
+* C1000K
+
+.image images/C1000K-FROM-YUFENG.png 575 560
+
+* How to fix it
+
+* Minimize context switching
+
+* IO multiplexing and Event driven model
+
+- select
+- poll
+- epoll
+
+* Demo of SELECT
+
+ // A rot13 server based on SELECT
+
+.link /examples/rot13_based_select.c Show me code
+
+* Let's run it
+
+ ./rot13_based_select // Listen on :40713
+
+* Trace it
+
+.image images/rot13-strace.jpeg 409 1024
+
+* Why not select or poll
+
+- Both need copy fd set from user space to kernel space in the select or poll system call
+- Both get available fd by traversing the all socket file descriptoers, and linear decrease of performance
+
+* Benchmark with SELECT, POLL and EPOLL
+
+.image images/libevent-benchmark.jpg 604 786
+
+* Why epoll
+
+- Using one fd to associate with multiple file desctriptoers, and store this in the kernel event list, so copy from user space to kernel space only once
+- Event driven, user space will be notified throught epoll_wait system call by kernel when register EPOLLIN or EPOLLOUT event in the specific fd
+- Focus only on active connections, so no linear decrease
+
+* Demo of epoll
+
+.link /examples/echo_server.c Show me code
+
+* Let's run it
+
+ ./echo-server 12345 10 // This is LT Mode
+ ./echo-server 12346 20 // This is ET Mode
+
+* Trace LT
+
+.image images/echo-server-lt-strace.jpeg 505 732
+
+* Trace ET
+
+.image images/echo-server-et-strace.jpeg 505 737
+
+* LT or ET
+
+ Mainly the server is the Request-Response mode.
+ A data packet consists of a Header and a Body.
+
+Non-Blocking
+
+ Both are setted to non-blocking
+
+READ
+
+ Basically we read to a local buffer untile return EAGAIN
+
+WRITE
+
+ LT: Need to monitor EPOLLOUT event for the FD when READ complete, and delete EPOLLOUT event ->
+    when WRITE complete,
+ LT: And it will handle write in the next event-loop.
+ ET: No need to modify the events of the FD
+
+* LT or ET
+
+Conclusion
+
+ LT will cause more epoll_wait system call
+ ET make that the caller must maintain a readable or writeable flag, since ET will just notify once ->
+    even the FD is readable or writeable.
+ Which is better deponds on the business scenario
+
+* Let's sum up
+
+- Event driven
+- Reactor model
+
+* Reactor: the connection flow
+
+.image images/client_connect_reactive_web_server.png
+
+* Reactor: the request flow
+
+.image images/client_send_request_to_reactive_web_server.png
+
+* Servers based on reactor
+
+- Nginx
+- Memcached
+
+* Nginx feature
+
+- multiple process
+- event driven based on epoll
+- CPU Affinity support
+- ...
+
+* Nginx process model
+
+.image images/nginx-architecture.png
+
+* Nginx event processing model
+
+.link /examples/nginx-event-loop.psuedo.go Show me code
+
+.code examples/nginx-event-loop.psuedo.go
+
+* Memcached feature
+
+- multiple thread
+- event driven based on libevent(which also based epoll in linux)
+- Master-Worker model
+
+* Memcached network model
+
+.image images/memcached_network_model.jpg
+
+* Memcached server model
+
+.link /examples/mc-eventloop-part.c Open in new tab
+
+.code -numbers -edit examples/mc-eventloop-part.c.go
+
+* Is it enough?
+
+* Callback hell
+
+ In business server programming, we need to achieve complicated logic,
+ and need to do lots of operations including access to DB/Queue/NoSQL and the other third system.
+ Yet all these logic process needed to register into event loop through callback fuction,
+ so we fell into the Callback Hell.
+
+* Callback hell
+
+ // Just a demo, but so ugly
+
+.code -numbers -edit examples/callbackhell.js.go
+
+* The ideal server model
+
+ // We can write out the the asynchronous execution code by synchronous logic
+
+- Event loop per thread
+- Coroutine support to avoid callback hell
+
+* Coroutine integrated with Event Loop
+
+ // Synchronous logic, Asynchronous execution
+
+.link https://gist.github.com/bufferx/5494125 Show me code
+
+* Framework that support both feature
+
+- Tornado
+- Gevent
+- Nginx Lua
+- ...
+
+* Tornado in production
+
+- 10 Virtual Machines in KVM
+- Core: 4, Memory: 8G
+- Multiple processes
+- Peak QPS: ~30K
+
+.image images/tornado-prd.png 340 1024
+
+* How about Golang
+
+- Based epoll in runtime
+- Write sync logic in goroutine
+
+* Demo of Echo Server in Golang
+
+.link /examples/echo.go Open in another tab
+
+.code -numbers -edit examples/echo.go
+
+* Let's run and trace it
+
+ // ./echo-go
+
+.image images/echo-go-strace.jpeg 150 900
+
+* The mechanism in runtime
+
+ // Don't know very much about runtime, maybe we can talk about it in the next topic
+
+.link https://golang.org/src/runtime/proc.go goroutine scheduler
+.link https://golang.org/src/net/fd_poll_runtime.go fd poll runtime
+.link https://golang.org/src/runtime/netpoll.go netpoll
+.link https://golang.org/src/runtime/netpoll_epoll.go netpoll based on epoll
+
+* References
+
+- EPOLL(7)
+- C10K: http://www.kegel.com/c10k.html
+- C1000K: http://www.slideshare.net/mryufeng/c1000k
+- https://en.wikipedia.org/wiki/Symmetric_multiprocessing
+- https://en.wikipedia.org/wiki/Non-uniform_memory_access
+- http://www.linfo.org/context_switch.html
+- http://libevent.org/
+- http://www.wangafu.net/~nickm/libevent-book/
+- http://www.cs.wustl.edu/~schmidt/PDF/proactor.pdf
+- http://tengine.taobao.org/book/index.html
+- http://www.programering.com
+- http://callbackhell.com/
